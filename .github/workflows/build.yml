@@ -1,0 +1,234 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Crear proyecto
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'FILE_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "HisenseRemote"
+          include(":app")
+          FILE_EOF
+          mkdir -p .
+          cat > build.gradle.kts <<'FILE_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          FILE_EOF
+          mkdir -p .
+          cat > gradle.properties <<'FILE_EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          FILE_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'FILE_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.hisenseremote"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.hisenseremote"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies { implementation("androidx.appcompat:appcompat:1.6.1") }
+          FILE_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FILE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.TRANSMIT_IR"/>
+              <uses-feature android:name="android.hardware.consumerir" android:required="false"/>
+              <application android:label="Hisense Remote" android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          FILE_EOF
+          mkdir -p app/src/main/java/com/example/hisenseremote
+          cat > app/src/main/java/com/example/hisenseremote/MainActivity.kt <<'FILE_EOF'
+          package com.example.hisenseremote
+
+          import android.content.Context
+          import android.hardware.ConsumerIrManager
+          import android.os.Bundle
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import androidx.appcompat.app.AppCompatActivity
+
+          class MainActivity : AppCompatActivity() {
+
+              // Codigos NECext del Hisense 32A4HAU (Flipper-IRDB): address 00 BF + comando y su inverso.
+              private fun c(cmd: Int, inv: Int) = intArrayOf(0x00, 0xBF, cmd, inv)
+
+              private val codes: Map<String, IntArray> = mapOf(
+                  "POWER" to c(0x0D, 0xF2),
+                  "UP" to c(0x16, 0xE9), "DOWN" to c(0x17, 0xE8),
+                  "LEFT" to c(0x19, 0xE6), "RIGHT" to c(0x18, 0xE7),
+                  "OK" to c(0x15, 0xEA),
+                  "BACK" to c(0x48, 0xB7), "HOME" to c(0x20, 0xDF),
+                  "PLAYPAUSE" to c(0xCA, 0x35),
+                  "VOL_UP" to c(0x44, 0xBB), "VOL_DOWN" to c(0x43, 0xBC), "MUTE" to c(0x0E, 0xF1),
+                  "CH_UP" to c(0x4A, 0xB5), "CH_DOWN" to c(0x4B, 0xB4),
+                  "APP_YOUTUBE" to c(0xAA, 0x55), "APP_NETFLIX" to c(0x2D, 0xD2)
+              )
+
+              private lateinit var ir: ConsumerIrManager
+
+              // NEC: cabecera 9ms+4.5ms, 4 bytes (LSB primero), marca final de 560us
+              private fun necPattern(bytes: IntArray): IntArray {
+                  val p = ArrayList<Int>()
+                  p.add(9000); p.add(4500)
+                  for (b in bytes) for (i in 0 until 8) {
+                      p.add(560); p.add(if (((b shr i) and 1) == 1) 1690 else 560)
+                  }
+                  p.add(560)
+                  return p.toIntArray()
+              }
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun send(key: String): String {
+                      if (!ir.hasIrEmitter()) return "Este celular no tiene IR"
+                      val code = codes[key] ?: return "Sin codigo: $key"
+                      ir.transmit(38000, necPattern(code))
+                      return "Enviado: $key"
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  ir = getSystemService(Context.CONSUMER_IR_SERVICE) as ConsumerIrManager
+                  val web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.addJavascriptInterface(Bridge(), "Android")
+                  web.loadUrl("file:///android_asset/remote.html")
+                  setContentView(web)
+              }
+          }
+          FILE_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/remote.html <<'FILE_EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <title>Hisense Remote</title>
+          <style>
+          :root{--bg:#eef0f4;--body:#fff;--key:#f1f3f7;--key2:#e3e7ee;--txt:#1b1f2a;--acc:#00b5a5;--red:#e5384f;--sh:0 6px 14px rgba(20,30,60,.12);box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+          @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0d12;--body:#151922;--key:#1f2430;--key2:#2a3040;--txt:#eef1f7;--sh:0 6px 14px rgba(0,0,0,.5)}}
+          html,body{margin:0;min-height:100%;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-tap-highlight-color:transparent;user-select:none}
+          .wrap{max-width:380px;margin:0 auto;padding:16px}
+          .remote{background:var(--body);border-radius:36px;padding:20px;box-shadow:var(--sh);display:grid;gap:18px}
+          .top{display:flex;justify-content:space-between;align-items:center}
+          .brand{font-weight:800;letter-spacing:.12em;font-size:14px}
+          button{border:0;background:var(--key);color:var(--txt);font:600 15px inherit;font-family:inherit;border-radius:18px;box-shadow:var(--sh);transition:transform .08s,background .15s;cursor:pointer}
+          button:active,button.p{transform:scale(.92);background:var(--key2)}
+          .pw{width:52px;height:52px;border-radius:50%;background:var(--red);color:#fff;font-size:22px}
+          .pw:active{background:#c42a40}
+          .dpad{position:relative;width:240px;height:240px;margin:0 auto;border-radius:50%;background:var(--key);box-shadow:inset 0 2px 10px rgba(0,0,0,.12)}
+          .dpad button{position:absolute;width:76px;height:76px;font-size:26px;border-radius:50%;box-shadow:none;background:transparent}
+          .dpad button:active{background:var(--key2)}
+          .u{top:6px;left:82px}.d{bottom:6px;left:82px}.l{left:6px;top:82px}.r{right:6px;top:82px}
+          .dpad .ok{left:80px;top:80px;width:80px;height:80px;background:var(--acc);color:#fff;font-size:20px;font-weight:800;box-shadow:var(--sh)}
+          .dpad .ok:active{background:#009587}
+          .row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+          .row button{height:54px;font-size:20px}
+          .rocker{display:grid;grid-template-rows:1fr auto 1fr;gap:6px;background:var(--key);border-radius:30px;padding:6px;align-items:center;justify-items:center;text-align:center}
+          .rocker button{width:100%;height:56px;font-size:24px;box-shadow:none;background:transparent;border-radius:24px}
+          .rocker button:active{background:var(--key2)}
+          .rocker small{font-size:11px;font-weight:700;letter-spacing:.12em;opacity:.6}
+          .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+          .apps{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+          .apps button{height:52px;color:#fff;font-weight:800}
+          .yt{background:#ff0033}.nf{background:#111;color:#e50914}
+          .yt:active{background:#cc0029}.nf:active{background:#2a2a2a}
+          .toast{text-align:center;font-size:12px;opacity:.65;height:16px}
+          </style>
+          </head>
+          <body>
+          <div class="wrap"><div class="remote">
+            <div class="top"><span class="brand">HISENSE</span><button class="pw" data-k="POWER" aria-label="Power">⏻</button></div>
+
+            <div class="dpad">
+              <button class="u" data-k="UP" aria-label="Up">▲</button>
+              <button class="l" data-k="LEFT" aria-label="Left">◀</button>
+              <button class="ok" data-k="OK">OK</button>
+              <button class="r" data-k="RIGHT" aria-label="Right">▶</button>
+              <button class="d" data-k="DOWN" aria-label="Down">▼</button>
+            </div>
+
+            <div class="row">
+              <button data-k="BACK" aria-label="Back">↩</button>
+              <button data-k="HOME" aria-label="Home">⌂</button>
+              <button data-k="PLAYPAUSE" aria-label="Play/Pause">⏯</button>
+            </div>
+
+            <div class="two">
+              <div class="rocker"><button data-k="VOL_UP">＋</button><small>VOL</small><button data-k="VOL_DOWN">－</button></div>
+              <div class="rocker"><button data-k="CH_UP">⌃</button><small>CH</small><button data-k="CH_DOWN">⌄</button></div>
+            </div>
+
+            <button data-k="MUTE" style="height:46px">🔇 Mute</button>
+
+            <div class="apps">
+              <button class="yt" data-k="APP_YOUTUBE">▶ YouTube</button>
+              <button class="nf" data-k="APP_NETFLIX">NETFLIX</button>
+            </div>
+            <div class="toast" id="t">Ready</div>
+          </div></div>
+          <script>
+          // Every button calls send(key). Wire this to your TV connection later.
+          const TV = { ip: "" };
+          function send(key){
+            document.getElementById("t").textContent = "Sent: " + key;
+            try{ navigator.vibrate && navigator.vibrate(12); }catch(e){}
+            try{ if(window.Android){ document.getElementById("t").textContent = Android.send(key); } }catch(e){}
+          }
+          document.querySelectorAll("[data-k]").forEach(b=>{
+            b.addEventListener("pointerdown",()=>b.classList.add("p"));
+            ["pointerup","pointerleave","pointercancel"].forEach(e=>b.addEventListener(e,()=>b.classList.remove("p")));
+            b.addEventListener("click",()=>send(b.dataset.k));
+          });
+          </script>
+          </body>
+          </html>
+          FILE_EOF
+
+      - name: Compilar
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HisenseRemote-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
